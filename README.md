@@ -22,7 +22,7 @@
 
 ## 快速开始
 
-**0. 你需要**：DSH（支持 `dsh.bundle` 与 `settings`）、Node ≥ 20、Python ≥ 3.9、[Ollama](https://ollama.com) 和一个能干活的工具调用模型（4B 起，7B 更稳）。
+**1. 你需要**：DSH（支持 `dsh.bundle` 与 `settings`）、Node ≥ 20、Python ≥ 3.9、[Ollama](https://ollama.com) 和一个能干活的工具调用模型（4B 起，7B 更稳）。
 
 ```bash
 git clone https://github.com/aba3345/dsh-bili-see.git
