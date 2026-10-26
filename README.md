@@ -10,16 +10,11 @@
 [![deps](https://img.shields.io/badge/npm%20deps-0-brightgreen)](package.json)
 [![for fun](https://img.shields.io/badge/purpose-%E5%A8%B1%E4%B9%90-ff69b4)](#免责声明)
 
-一个跑在 [DeepSeek Harness](https://github.com/deepseek-ai) 上的本地插件。
-**什么时候跑由宿主自带的定时任务决定**——插件没有「跑一轮」按钮，也不阻塞任何对话。
+一个跑在 [DeepSeek Harness](https://github.com/deepseek-ai) 上的插件。
 
 </div>
 
 ![dsh-bili-see 漫画：50M 预算、4B 小模型干活、最后余额 49.5M](docs/assets/comic-bili-see.jpg)
-
-> 用户拨了 50M token 的预算去运营 B 站账号。
-> 鲸鱼娘想了想，把活派给了本机的 Qwen3.5 4B，自己只负责看报告。
-> 一轮跑完，余额 49.5M —— 因为干活的那一位，不吃云端 token。
 
 四格漫画就是这个项目的结构：**云端模型只负责说话，本地模型负责跑腿。**
 
