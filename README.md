@@ -20,31 +20,31 @@
 
 ---
 
-## 快速开始
+## 部署
 
-**1. 你需要**：DSH（支持 `dsh.bundle` 与 `settings`）、Node ≥ 20、Python ≥ 3.10、[Ollama](https://ollama.com) 和一个能干活的工具调用模型（4B 起，7B 更稳）。
+需要 DSH（支持 `dsh.bundle` 与 `settings`）、Node ≥ 20、Python ≥ 3.10、[Ollama](https://ollama.com) + 一个能调工具的模型（4B 起）。
 
-> Python 卡在 3.10：依赖里的 `mcp` 1.x 要求 ≥ 3.10，3.9 上 `pip install` 直接失败。
+**1. 拿代码、装依赖**
 
 ```bash
 git clone https://github.com/aba3345/dsh-bili-see.git
 cd dsh-bili-see
-
-# 1. Python 依赖（mcp 必须 < 2，2.x 把 FastMCP 改名了，装上会直接 import 失败）
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -r requirements.txt   # macOS/Linux: .venv/bin/python
 ```
 
-**2. 挂进 profile**：编辑 `$DSH_HOME/profiles/desktop/package.json`，加一条 `link:` 依赖并列进 bundles。
+> `mcp` 必须 < 2，Python 必须 ≥ 3.10（`mcp` 1.x 的要求）。
+
+**2. 挂进 profile** —— `$DSH_HOME/profiles/desktop/package.json`：
 
 ```json
 {
-  "dependencies": { "dsh-bili-see": "link:E:/tools/dsh-bili-see" },
+  "dependencies": { "dsh-bili-see": "link:<克隆路径>" },
   "dsh": { "profile": { "bundles": ["...", "dsh-bili-see"] } }
 }
 ```
 
-**3. 打开定时能力**：在 profile 的 `cordis.patch.yml` 末尾加一条（包就在 DSH 依赖树里，不用 npm install）：
+**3. 打开定时能力** —— 同一个 profile 的 `cordis.patch.yml` 末尾：
 
 ```yaml
 - insert:
@@ -52,14 +52,24 @@ python -m venv .venv
       name: "@deepseek-ai/dsh-schedule"
 ```
 
-**4. 重启 DSH**，左侧出现「B站视频评论设置」。先跑 `node selfcheck.mjs`，它按真实依赖链依次检查：包内文件 → Python 依赖 → 家目录铺设 → Ollama → 模型 → 凭证。
+**4. 重启 DSH** —— 左侧出现「B站视频评论设置」，`node selfcheck.mjs` 全绿后扫码登录。
+第一次跑保持「允许发评论」关闭。
 
-**5.** 设置页四个状态点全绿后扫码登录。**第一次跑请保持「允许发评论」关闭**，确认它会读会判断，再决定开不开写权限。
+---
 
-让宿主建定时任务，只需要对模型说一句：
+## 让 Agent 帮你装
 
-> 帮我建一个定时任务：每 24 小时调用 `bilisee_tick` 启动一轮 B 站巡航，不要等它跑完；
-> 稍后用 `bilisee_summary` 取结论向我简短汇报。
+把下面这段整段丢给编码 Agent（WorkBuddy / Claude Code / Cursor 都行），或者让它读 [`install.prompt.md`](install.prompt.md)：
+
+> 帮我部署 dsh-bili-see：https://github.com/aba3345/dsh-bili-see
+>
+> 1. clone 到我指定的目录（默认 `~/tools/dsh-bili-see`），在仓库根建 `.venv`，`pip install -r requirements.txt`（mcp 必须 < 2，Python ≥ 3.10）；
+> 2. 在 `$DSH_HOME/profiles/desktop/package.json` 的 `dependencies` 里加 `"dsh-bili-see": "link:<克隆路径>"`，并把 `dsh-bili-see` 加进 `dsh.profile.bundles`；
+> 3. 在 profile 的 `cordis.patch.yml` 末尾插入 `@deepseek-ai/dsh-schedule`；
+> 4. 跑 `node selfcheck.mjs`，把没过的项和修法告诉我；
+> 5. 重启 DSH，等我扫码登录。
+>
+> 不要改我的 `config.json`、`bili_credential.json` 和 `bili_plus.db`。
 
 ---
 
@@ -106,7 +116,7 @@ node selfcheck.mjs                   # 不启动宿主也能跑的自检
 node tests/test-apply.mjs            # 假宿主跑 apply()：工具 + HTTP 路由
 node tests/test-client.mjs           # 真渲染一遍设置页，检查文案
 node tests/test-tool-run.mjs         # 全链路：tick → 轮询 → summary
-PYTHONPATH=python/autopilot python tests/test_engine_v2.py   # 引擎单测（84 项，不联网不跑模型）
+PYTHONPATH=python/autopilot python tests/test_engine_v2.py   # 引擎单测（85 项，不联网不跑模型）
 ```
 
 `tests/workbuddy-live.mjs` 只用本机 Ollama，加 `--write` 才会真发。欢迎 PR，见 [CONTRIBUTING.md](CONTRIBUTING.md)。
