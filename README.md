@@ -25,52 +25,6 @@
 
 ---
 
-## 它解决什么问题
-
-让 AI 看懂一条 B 站视频，需要字幕、热评、关键帧、UP 主、播放数据——每样都要调接口，每样都要进上下文。
-全交给云端大模型，一轮几万 token；全交给本地小模型，它又把注意力花在「怎么调工具」上。
-
-于是这活儿被拆成两半：
-
-- **本地模型跑腿**：选片、读字幕、看热评、写评论、发出去、核验。它自己循环，上下文爆了压缩记忆继续，进程死了被重新拉起。
-- **云端模型说话**：只读一份几百字的 `digest`（本轮结论），不读原始记忆。
-
-分页、重试、失败恢复全都发生在你机器上。云端 prompt 从一万多字符降到一千多字符。
-
----
-
-## 核心特性
-
-| 能力 | 说明 |
-| --- | --- |
-| **触发权归宿主** | 到点由 `dsh-schedule` 唤起一轮对话，模型调一次 `bilisee_tick` 就把活交出去，立即拿到 `run_id` |
-| **自主巡航** | 一轮里完成「选片 → 读字幕 → 读热评 → 判断 → 写稿 → 发布 → 核验」，不需要上层逐条指挥 |
-| **双层续跑** | 引擎内压缩记忆后重发「继续」；MCP 外层检测到 `needs_continue` 就以 `--resume` 重新拉起。同一错误连续两次即停 |
-| **写权限物理隔离** | 设置页没开「允许发评论」时，Python 侧**根本不注册**写工具——不是注册后拒绝，是列表里连影子都没有 |
-| **五档安全闸** | `allow` / `warn` / `rewrite` / `block` / `no_reply`，取最严的一档；`block` 不可审批绕过 |
-| **防跑飞** | 同视频同轮复用草稿、同工具同参重复 5 次收尾、看过的不重复评论、额度用尽不返回候选 |
-| **风控自动刹车** | 命中 B 站风控立即暂停并落库，不重试 |
-| **全程可审计** | 每轮一个目录：`state.json` / `memory.md` / `thinking.md` / `trace.jsonl` / `digest.md` / `report.md` |
-| **零 npm 依赖** | 纯 ESM，不打包、不编译 |
-
----
-
-## 架构
-
-```
-宿主定时任务 ──到点唤起一轮──> 模型调 bilisee_tick（非阻塞，拿 run_id）
-                                   │
-index.js ── 工具注册 / 设置页 HTTP 路由
-   ├─ stdio MCP ──> python/mcp_server.py      B 站访问层：字幕 / 热评 / 关键帧 / 发布
-   └─ stdio MCP ──> python/autopilot/         本地模型引擎（内部再拉起一份 mcp_server.py）
-```
-
-三层互相独立，都能单独替换：引擎能当普通 MCP 服务跑；B 站层能接到任意 MCP 客户端；前端只依赖 `/api/bili-see`。
-
-引擎做成独立子进程而不是塞进宿主，是因为一轮要跑几十秒到十几分钟——关掉界面它也能跑完，下次打开还能读到结果。
-
----
-
 ## 快速开始
 
 **0. 你需要**：DSH（支持 `dsh.bundle` 与 `settings`）、Node ≥ 20、Python ≥ 3.9、[Ollama](https://ollama.com) 和一个能干活的工具调用模型（4B 起，7B 更稳）。
@@ -131,22 +85,6 @@ python -m venv .venv
 | 内容配额 | `AI科技 / AI二创 / 其他` | 一行一条；没填满的额度变成「自主浏览」，从热门里挑非 AI 视频补位 |
 
 人设模板在 `config/persona.yaml`（不含真实账号信息）。**自定义请放 `$DSH_HOME/bili-see/persona.yaml`**，优先级更高，也不会跟着代码提交出去。
-
----
-
-## 工具
-
-**引擎**
-
-`bilisee_tick`（唯一入口，立即返回 `run_id`）、`bilisee_summary`（汇报优先用它）、`bilisee_status`、`bilisee_digest`、`bilisee_runs`、`bilisee_cancel`、`bilisee_health`、`bilisee_models`
-
-> `bilisee_run` / `bilisee_wait` 已移除：一个阻塞等结果，一个依赖前者。自动化驱动之后它们既没必要也有害。
-
-**B 站读取**（不需要 Ollama，可直接给任意 MCP 客户端用）
-
-`bilisee_me`、`bilisee_search`、`bilisee_video`、`bilisee_subtitle`、`bilisee_comments`、`bilisee_popular`、`bilisee_audit`
-
-**三种玩法**：只读不评论（默认）／先看后发（上限 1 条、冷却 120 分钟，观察一周）／纯数据源（忽略引擎只用读取工具）。
 
 ---
 
