@@ -1,0 +1,58 @@
+{
+  "name": "dsh-bili-see",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "B站视频评论设置：读字幕/热评/关键帧 + 让本地小模型自己刷视频、判断、发评论。合并自 dsh-bili-plus 与 bili-autopilot。",
+  "license": "MIT",
+  "author": "aba3345",
+  "homepage": "https://github.com/aba3345/dsh-bili-see#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aba3345/dsh-bili-see.git"
+  },
+  "bugs": {
+    "url": "https://github.com/aba3345/dsh-bili-see/issues"
+  },
+  "keywords": ["dsh", "dsh-bundle", "bilibili", "b站", "local-model", "ollama", "autopilot", "mcp"],
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "selfcheck.mjs",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/",
+    "lib/",
+    "python/",
+    "config/",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-settings-plugins"
+      ]
+    }
+  },
+  "scripts": {
+    "selfcheck": "node selfcheck.mjs",
+    "test": "node tests/test-apply.mjs",
+    "test:engine": "python tests/test_engine_v2.py"
+  }
+}

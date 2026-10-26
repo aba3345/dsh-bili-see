@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  syntax:
+    name: 语法与结构
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Node 语法检查
+        run: |
+          for f in index.js client.js selfcheck.mjs lib/*.mjs tests/*.mjs; do
+            node --check "$f" || exit 1
+          done
+          echo "ESM 语法全部通过"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Python 编译检查
+        run: python -m compileall -q python tests
+
+      - name: 包内文件齐全（selfcheck 第一步）
+        run: |
+          for f in index.js client.js package.json cordis.patch.yml \
+                   lib/mcp-client.mjs lib/python-env.mjs lib/state.mjs lib/hostdeps.mjs \
+                   python/mcp_server.py python/api.py python/db.py python/safety.py \
+                   python/autopilot/bili_autopilot/server.py \
+                   python/autopilot/bili_autopilot/agent.py \
+                   python/autopilot/bili_autopilot/config.py \
+                   config/persona.yaml requirements.txt; do
+            [ -f "$f" ] || { echo "缺文件：$f"; exit 1; }
+          done
+          echo "包内文件齐全"
+
+  engine:
+    name: 引擎单测（py${{ matrix.python-version }}）
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: 安装依赖
+        run: python -m pip install -r requirements.txt
+
+      - name: 跑引擎单测（不联网、不碰 B站、不跑模型）
+        env:
+          PYTHONPATH: python/autopilot
+        run: python tests/test_engine_v2.py
+
+  secrets:
+    name: 别把凭证提交上来
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查敏感文件
+        run: |
+          bad=$(git ls-files | grep -E '(^|/)(config|see-config|bili_credential|credential|cookies)\.json$|\.(db|db-wal|db-shm|log)$' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::这些文件不该进仓库："
+            echo "$bad"
+            exit 1
+          fi
+          echo "没有敏感文件"

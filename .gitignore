@@ -1,0 +1,113 @@
+# ─────────────────────────────────────────────────────────────
+# dsh-bili-see / .gitignore
+# 原则：代码进仓库，运行产物、凭证、日志、虚拟环境一律不进。
+# ─────────────────────────────────────────────────────────────
+
+# ── Node ────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+.npm/
+dist/
+build/
+
+# ── Python ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# ── 插件运行时产物（🔴 绝对不能提交）────────────────────────
+# 凭证与会话
+bili_credential.json
+credential*.json
+*credential*.json
+cookies*.json
+.env
+.env.*
+!.env.example
+
+# 用户配置（含个人账号名、路径、模型偏好）
+config.json
+see-config.json
+state.json
+persona.local.yaml
+*.local.json
+
+# 数据库与审计
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# 日志与运行目录
+*.log
+logs/
+duty.log
+runner.log
+autopilot-home/
+runs/
+run-*/
+*.run.json
+
+# Python 探测临时文件（lib/python-env.mjs 会写入包目录）
+.probe-*.json
+.probe-*
+
+# 关键帧与截图缓存
+frames/
+shots/
+*.jpg.tmp
+*.png.tmp
+
+# ── 备份与临时文件 ──────────────────────────────────────────
+*.bak
+*.bak-*
+*.orig
+*.rej
+*.tmp
+*.swp
+*~
+_backup/
+_backup_*/
+*.patch.tmp
+
+# ── 编辑器 / IDE ────────────────────────────────────────────
+.vscode/*
+!.vscode/settings.json.example
+!.vscode/launch.json.example
+.idea/
+*.iml
+*.sublime-workspace
+*.code-workspace
+
+# ── 操作系统 ────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ── 生成的预览页（tests/test-client.mjs --html 的产物）──
+tests/preview*.html

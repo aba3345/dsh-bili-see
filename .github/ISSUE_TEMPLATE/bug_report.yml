@@ -1,0 +1,66 @@
+name: 出了点问题
+description: 跑不起来、跑飞了、跑出来的东西不对劲
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **贴日志前请删掉** cookie、UID、房间号、评论原文里能定位到真人的内容。
+        凭证泄露、绕过写权限、越权发布这类安全问题**不要发在这里**，走 [私密报告](https://github.com/aba3345/dsh-bili-see/security/advisories/new)。
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 一句话说清楚现象。如果报错信息很短，直接贴代码块。
+      placeholder: bilisee_tick 返回了 run_id，但 bilisee_status 十分钟都停在「刚启动」。
+    validations:
+      required: true
+
+  - type: textarea
+    id: expect
+    attributes:
+      label: 你本来以为会发生什么
+    validations:
+      required: true
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: 卡在哪一段
+      options:
+        - 装不上 / 设置页打不开
+        - selfcheck 某项没过
+        - Ollama / 模型不通
+        - B 站登录 / 接口 412
+        - 跑起来但一轮跑不完
+        - 评论发出去了但不对劲
+        - 其他
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: 用的哪个模型
+      placeholder: qwen3.5:4b-32k / llama3.1:8b / 其他
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: 环境
+      description: 系统 + Node 版本 + Python 版本 + DSH 版本
+      placeholder: Win11 / Node 22.22 / Python 3.13.14 / DSH 1.x
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志
+      description: "node selfcheck.mjs 的输出，或 $DSH_HOME/bili-see/duty.log 的相关片段。"
+      render: shell
+    validations:
+      required: false

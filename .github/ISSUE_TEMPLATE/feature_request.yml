@@ -1,0 +1,38 @@
+name: 提个想法
+description: 新能力、更好的判断、更省 token 的做法
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        开之前先想一句：**这件事该由插件做，还是该由人设文件 / 设置页做？**
+        前者是代码，后者改 `persona.yaml` 就够，不用等版本更新。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 现在麻烦在哪
+      description: 描述处境，不要一上来就给方案。
+      placeholder: 4B 模型经常把「这条不值得评」判断成「读不到字幕」，然后就重试到次数上限。
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: 你想到的做法
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 涉及哪一层
+      options:
+        - 引擎（选片 / 判断 / 写稿 / 续跑）
+        - B 站访问层（接口 / 凭证 / 关键帧）
+        - 设置页 UI
+        - 安全策略
+        - 文档
+    validations:
+      required: true

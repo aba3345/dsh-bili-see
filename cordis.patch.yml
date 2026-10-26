@@ -1,0 +1,14 @@
+# dsh-bili-see 的 bundle patch
+#
+# 一条 insert 就够：宿主读 dsh.bundle.patch 指向这个文件，
+# 把 `name` 指向的包当插件挂进内核。
+#
+# ⚠️ `id` 必须和 index.js 导出的 `name`（也就是 `bili-see`）一致 ——
+#    设置页靠 loader 条目 id 找我们这一行表单，写错了设置页就改不动值。
+# ⚠️ 不要在这里写 dependencies / 构建步骤 —— 这是 host-only bundle，
+#    index.js 是原生 ESM，宿主直接 import，没有打包环节。
+
+- insert:
+    - id: bili-see
+      name: 'dsh-bili-see'
+      config: {}
