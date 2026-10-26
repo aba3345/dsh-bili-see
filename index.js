@@ -831,6 +831,22 @@ export function apply(ctx, config) {
       try { engine = fromPy(await callAp('health', {})) } catch (e) { engine = { ok: false, error: String(e?.message || e) } }
       let cred = null
       try { cred = fromPy(await callBili('credential_check'), {}) } catch (e) { cred = { ok: false, error: String(e?.message || e) } }
+      // 已登录就把额度一起带出来：health 是「一眼看全」的工具，
+      // 少了「今日已发 / 还剩几条」，调用方还得再问一次 status。
+      let usage = null
+      if (cred?.logged_in) {
+        try { usage = fromPy(await callBili('status'), {}) } catch { /* 拿不到只影响额度展示 */ }
+      }
+      const bili = {
+        ...(cred || {}),
+        ...(usage ? {
+          posts_24h: usage.posts_24h,
+          quota_left: usage.quota_left,
+          limits: usage.limits,
+          paused: usage.paused,
+          write_enabled: usage.write_enabled,
+        } : {}),
+      }
       const checks = {
         python: Boolean(ensurePython()?.hasDeps),
         ollama: o.ok,
@@ -846,7 +862,7 @@ export function apply(ctx, config) {
         ollama_url: cfg.ollamaUrl,
         ollama_models: (o.models || []).map((m) => m.name),
         ollama_error: o.error || '',
-        bili: cred,
+        bili,
         engine_checks: engine?.checks || null,
         engine_error: engine?.error || '',
         python: pyInfo ? { path: pyInfo.path, version: pyInfo.version } : null,

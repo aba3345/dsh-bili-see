@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import budget
-from .bili_mcp import BiliPlusBridge, BiliToolError
+from .bili_mcp import BiliPlusBridge
 from .config import RunPaths
 from .memory import MemoryStore
 from .ollama_client import ChatResult, OllamaClient, OllamaError
@@ -19,7 +19,6 @@ from .util import (
     json_dumps,
     normalize_bvid,
     now_iso,
-    parse_bool,
 )
 
 # 说这些词等于自曝"我是本地小模型"。账号人设是 deepseek / 大肥鱼 / 鲸鱼娘。

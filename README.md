@@ -6,7 +6,7 @@
 
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![node](https://img.shields.io/badge/node-%E2%89%A520-339933?logo=node.js&logoColor=white)](package.json)
-[![python](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)](requirements.txt)
+[![python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](requirements.txt)
 [![deps](https://img.shields.io/badge/npm%20deps-0-brightgreen)](package.json)
 [![for fun](https://img.shields.io/badge/purpose-%E5%A8%B1%E4%B9%90-ff69b4)](#免责声明)
 
@@ -22,7 +22,9 @@
 
 ## 快速开始
 
-**1. 你需要**：DSH（支持 `dsh.bundle` 与 `settings`）、Node ≥ 20、Python ≥ 3.9、[Ollama](https://ollama.com) 和一个能干活的工具调用模型（4B 起，7B 更稳）。
+**1. 你需要**：DSH（支持 `dsh.bundle` 与 `settings`）、Node ≥ 20、Python ≥ 3.10、[Ollama](https://ollama.com) 和一个能干活的工具调用模型（4B 起，7B 更稳）。
+
+> Python 卡在 3.10：依赖里的 `mcp` 1.x 要求 ≥ 3.10，3.9 上 `pip install` 直接失败。
 
 ```bash
 git clone https://github.com/aba3345/dsh-bili-see.git
@@ -76,7 +78,8 @@ python -m venv .venv
 | 允许发评论 | 关 | 总开关，关闭时写工具不注册 |
 | 内容配额 | `AI科技 / AI二创 / 其他` | 一行一条；没填满的额度变成「自主浏览」，从热门里挑非 AI 视频补位 |
 
-人设模板在 `config/persona.yaml`。**自定义请放 `$DSH_HOME/bili-see/persona.yaml`**，优先级更高，也不会跟着代码提交出去。
+人设就在 `config/persona.yaml`，**直接改**，下一轮生效，不用重启。实际生效的是家目录那份
+（设置页的「人设」编辑器写的就是它，升级不会覆盖）；仓库这份是开箱默认值，不含任何真实账号信息。
 
 ---
 

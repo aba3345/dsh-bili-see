@@ -339,7 +339,7 @@ async def scout(
         plan.append({"key": spec["key"], "name": spec["name"], "quota": spec["quota"], "got": 0})
 
     total_cap = remaining
-    for spec, plan_row in zip(specs, plan):
+    for spec, plan_row in zip(specs, plan, strict=True):
         if len(picked) >= total_cap:
             break
         want = min(spec["quota"], total_cap - len(picked))

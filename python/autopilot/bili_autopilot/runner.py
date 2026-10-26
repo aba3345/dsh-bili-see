@@ -8,7 +8,7 @@ import sys
 import traceback
 from typing import Any
 
-from . import budget, summary
+from . import summary
 from .agent import Agent, AgentOutcome
 from .bili_mcp import BiliPlusBridge
 from .config import load_run_config, paths_for

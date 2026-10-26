@@ -69,7 +69,6 @@ def _fix_comment_section(text: str, videos: list[dict[str, Any]]) -> tuple[str, 
 
     保留模型写的 视频段 / 推荐段，只纠正这一段 —— 这段是事实陈述，不能靠模型。
     """
-    import re
 
     fact = _comment_facts(videos)
     lines = str(text or "").splitlines()

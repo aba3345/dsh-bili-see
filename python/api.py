@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 from wbi import (
     BiliClient,
@@ -17,7 +17,6 @@ from wbi import (
     clean_title,
     fmt_duration,
     guard_api,
-    strip_index,
     unwrap,
 )
 

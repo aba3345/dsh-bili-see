@@ -271,9 +271,7 @@ def login_qr_start() -> str:
     拿着 key 每隔 2 秒调 login_qr_poll 一次；二维码大约 180 秒过期。"""
     import qrcode  # 延迟导入：没装也不影响其它工具
 
-    c = client()
-    data = c.get("/x/passport-login/web/qrcode/generate", absolute=True) if False else None
-    # 直接用底层请求（这个接口不需要 cookie 也不需要 wbi）
+    # 这个接口不需要 cookie 也不需要 wbi，直接用底层请求
     import urllib.request
     req = urllib.request.Request(
         "https://passport.bilibili.com/x/passport-login/web/qrcode/generate",

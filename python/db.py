@@ -25,7 +25,7 @@ import json
 import os
 import sqlite3
 import time
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;

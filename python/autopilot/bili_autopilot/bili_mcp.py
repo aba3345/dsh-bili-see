@@ -6,7 +6,6 @@ import os
 import sys
 from contextlib import AsyncExitStack
 from datetime import timedelta
-from pathlib import Path
 from typing import Any
 
 from mcp import ClientSession

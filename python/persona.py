@@ -3,25 +3,22 @@ persona.py —— 人设：把 persona.yaml 读成提示块 + 风格检查
 ============================================================================
 两个职责，别混：
 
-  ① **提示**：给宿主模型一个"你以谁的身份说话"的段落（`persona_prompt()`）。
-     它只管语气和身份，**不含任何安全判断** —— 安全在 safety.py。
+  ① **提示**：给宿主模型一个「你以谁的身份说话」的段落（`persona_prompt()`）。
+     只管语气和身份，**不含任何安全判断** —— 安全在 safety.py。
   ② **检查**：模型写完了，看看像不像这个人（`check_style()`）。
 
-⚠️ 原项目一个很实在的设计，这里保留：
-   banned_phrases 用**子串**匹配，不用正则。人设词表是给人改的，
-   正则会被改出语法错误（原项目 safety.yaml:289 就这么坏过一次）。
-   子串匹配慢一点，但改不坏。
+两条实现约束：
 
-⚠️ 另一个教训：**没有 PyYAML 也能跑**。
-   venv 里可能没装 pyyaml，而人设是插件启动就要用的东西 ——
-   所以写一个只认"我们这个 schema"的极简解析器兜底。
+  · `banned_phrases` 用**子串**匹配，不用正则。词表是给人改的，
+    正则会被改出语法错误；子串慢一点，但改不坏。
+  · **没有 PyYAML 也要能跑**。人设是插件启动就要用的东西，
+    所以带一个只认本文件 schema 的极简解析器兜底。
 ============================================================================
 """
 from __future__ import annotations
 
 import os
 import re
-import time
 from typing import Any, Dict, List
 
 # ── 缓存：文件改了自动重载（不重启 dsh 就能改人设）─────────────
@@ -31,18 +28,12 @@ _CACHE: Dict[str, Any] = {"path": "", "mtime": 0.0, "data": None, "raw": ""}
 def _persona_path() -> str:
     """人设文件在哪：环境变量优先，其次家目录，最后包内 config/。
 
-    🔴 这里踩过一个**静默失效**的坑，别再改回去：
-       原实现最后一步是 `dirname(here)/config/persona.yaml`，这个路径只在
-       「包内 python/ 子目录」布局下成立。但生产环境里 `python/*.py` 是被
-       `lib/state.mjs#syncPythonFiles()` **平铺**进家目录的，于是
-           here          = <home>                （就是家目录本身）
-           dirname(here) = <home> 的上一级
-       拼出来是 `<DSH_HOME>/config/persona.yaml` —— 那个文件根本不存在。
-       后果不是报错，是 `load_persona()` 返回 `{}`，于是：
-           · persona_prompt() 只剩那句默认的"硬性要求"，人设整段消失
-           · banned_phrases / max_length / catchphrase 全部取不到
-           · check_style() 的长度和禁词检查**静默失效**（永远通过）
-       全部候选都走 `isfile()`，谁先存在用谁，一个都不存在才回落到包内路径。
+    🔴 别把最后一步写成 `dirname(here)/config/persona.yaml`：
+       生产环境 `python/*.py` 是被 `lib/state.mjs#syncPythonFiles()` **平铺**进家目录的，
+       那时 `here` 就是家目录本身，`dirname(here)` 指向 `<DSH_HOME>`，
+       拼出来是个不存在的路径。后果不是报错 —— 是 `load_persona()` 返回 `{}`，
+       人设整段消失、`banned_phrases` / `max_length` 静默失效。
+       所以候选一律走 `isfile()`，谁先存在用谁。
     """
     env = os.environ.get("BILI_PLUS_PERSONA", "").strip()
     if env:
@@ -69,6 +60,19 @@ def _persona_path() -> str:
             continue
     # 一个都没有：返回第一候选，让上层 `loaded` / `persona_path` 能看见它不存在
     return candidates[0]
+
+
+def _writable_persona_path() -> str:
+    """写回人设时用哪条路径。
+
+    永远优先写家目录那份：包内 `config/persona.yaml` 是**模板**，
+    直接改它等于改代码 —— 下次升级就被覆盖，用户还以为自己改坏了。
+    家目录不存在时也不退回包内，先建出来再说。
+    """
+    home = os.environ.get("BILI_PLUS_HOME", "").strip()
+    if home:
+        return os.path.join(home, "persona.yaml")
+    return _persona_path()
 
 
 # ── 极简 YAML（只认我们这个人设文件的结构）─────────────────────
@@ -389,15 +393,13 @@ def read_raw() -> str:
 def save_raw(text: str, *, backup: bool = True) -> Dict[str, Any]:
     """把整段原文写回人设文件，写完立刻清缓存（下一次 load_persona 就是新内容）。
 
-    🔴 为什么整段写而不是改单字段：
-       人设文件里有大段中文注释和 `intro: |` 多行块，
-       任何「读 dict 再 dump 回去」的做法都会把注释和排版冲掉。
-       主人手改过的东西不能因为我改一个字段就消失。
+    整段写而不是改单字段：人设里有中文注释和 `intro: |` 多行块，
+    任何「读 dict 再 dump 回去」都会把注释和排版冲掉。
 
-    校验：写完必须还能被同一个解析器读成 dict，否则**回滚**（把原文写回去）。
-          否则一次写坏 ⇒ load_persona 返回 {} ⇒ 人设整段静默失效。
+    写完必须还能被同一个解析器读成 dict，否则**回滚**（把原文写回去）——
+    一次写坏就等于 `load_persona()` 返回 `{}`，人设整段静默失效。
     """
-    path = _persona_path()
+    path = _writable_persona_path()
     old = ""
     try:
         with open(path, "r", encoding="utf-8") as f:

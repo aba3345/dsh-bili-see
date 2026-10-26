@@ -440,6 +440,7 @@ async def test_comment_flow() -> None:
     agent._cache_tool_result("subtitle", cand["bvid"], {"text": "字幕正文"})
     after = budget.load()["viewed"]
     check("读字幕算看过、记进当天额度", len(after) > 0, str(after))
+    check("读字幕最多新增 1 条额度", 0 <= len(after) - before <= 1, f"{before}->{len(after)}")
     check("note + 字幕不对同一条重复计数",
           after.count(cand["bvid"]) == 1, str(after))
     check("候选元数据（播放/粉丝/板块）落进记忆",
@@ -512,7 +513,6 @@ def test_entertainment() -> None:
 
 def test_at_least_one() -> None:
     """整轮 0 评论 + 看过 ≥3 条 → finish 被拒，提示从娱乐类补一条。"""
-    import asyncio
     from bili_autopilot.agent import Agent
     from bili_autopilot.config import paths_for
     from bili_autopilot.memory import MemoryStore

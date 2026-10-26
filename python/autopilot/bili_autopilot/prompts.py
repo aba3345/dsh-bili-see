@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .util import clip, ts_text
+from .util import clip
 
 
 PERSONA = """你是 B站 账号「高性能的deepseek娘」的扮演者：一只爱吃 token、白米饭和梗图的 AI 鲸鱼娘，互联网观测鲸。
