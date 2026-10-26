@@ -165,19 +165,6 @@ python -m venv .venv
 
 ---
 
-## 常见问题
-
-**Ollama 是红的** — 先 `ollama serve`，再 `ollama pull <你的模型>`。
-
-**页面能连 Ollama，引擎却说「未就绪」** — 子进程继承了系统代理，回环请求被转成 502。插件已给 Python 注 `NO_PROXY` 并让 httpx `trust_env=False`；装过 Clash / V2Ray 的机器最容易碰上，更新后重启宿主即可。
-
-**图省 token 想自己动 `num_predict`** — 调太小会把话说一半截断，然后疯狂 `needs_continue`。4B 建议 1800。
-
-**`tick` 返回了 `run_id` 却没结果** — 这是设计行为，它不等跑完。用 `bilisee_status` 看进度、`bilisee_summary` 取结论。
-
-**想彻底重来** — 停用插件 → 删 `$DSH_HOME/bili-see/` → 重启 → 重新扫码。
-
----
 
 ## 开发
 
