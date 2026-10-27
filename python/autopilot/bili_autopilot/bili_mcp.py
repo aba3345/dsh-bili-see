@@ -11,7 +11,7 @@ from typing import Any
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-from .config import default_bili_plus_home
+from .config import allow_write_env, default_bili_plus_home
 from .util import clip, json_dumps, python_exe
 
 
@@ -109,14 +109,18 @@ class BiliPlusBridge:
         self.tools: dict[str, Any] = {}
 
     def _env(self) -> dict[str, str]:
+        # ⚠️ 写工具注册看**两件事**：run 快照里的 write，以及当前环境授权。
+        #    旧实现只看快照 —— 快照是启动时写死的，于是"关掉允许发评论"之后，
+        #    已经在跑（或被恢复）的任务仍会拿到 BILI_PLUS_WRITE=1 和全套写工具。
+        write_ok = bool(self.config.get("write")) and allow_write_env()
         allowed = list(READ_TOOLS)
-        if bool(self.config.get("write")):
+        if write_ok:
             allowed.extend(WRITE_TOOLS)
         env = os.environ.copy()
         env.update(
             {
                 "BILI_PLUS_HOME": str(self.home),
-                "BILI_PLUS_WRITE": "1" if self.config.get("write") else "0",
+                "BILI_PLUS_WRITE": "1" if write_ok else "0",
                 "BILI_PLUS_TOOLS": ",".join(dict.fromkeys(allowed)),
                 "BILI_PLUS_MAX_POSTS_PER_DAY": str(self.config.get("max_posts_per_day", 5)),
                 "BILI_PLUS_MIN_INTERVAL_MIN": str(self.config.get("min_interval_min", 30)),

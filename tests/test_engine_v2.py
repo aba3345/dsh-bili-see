@@ -26,6 +26,10 @@ os.environ["BILI_PLUS_HOME"] = str(Path(TMP) / "plus-home")
 Path(os.environ["BILI_AUTOPILOT_HOME"]).mkdir(parents=True, exist_ok=True)
 Path(os.environ["BILI_PLUS_HOME"]).mkdir(parents=True, exist_ok=True)
 os.environ.pop("BILI_AUTOPILOT_CONFIG_FILE", None)
+# 这些用例测的是「已经授权写入」之后的链路（note → 草稿 → 发 → 核验）。
+# 写权限现在要求**当前**环境也授权（防止用旧快照续跑时把权限带回来），
+# 所以这里显式模拟宿主已授权；撤销授权的行为由 test_write_revoked 单独覆盖。
+os.environ["BILI_AUTOPILOT_ALLOW_WRITE"] = "1"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python" / "autopilot"))
 
@@ -560,6 +564,169 @@ def test_at_least_one() -> None:
     check("已有评论时 finish 放行", r2.get("ok") is True, str(r2))
 
 
+# ─────────────────────── 写授权撤销 / 限额 / 熔断语义 ───────────────────────
+
+
+async def test_write_revoked() -> None:
+    """当前没有写授权时，就算 run 快照是 write=true 也不能写。"""
+    from bili_autopilot.agent import Agent
+    from bili_autopilot.config import paths_for
+    from bili_autopilot.memory import MemoryStore
+    from bili_autopilot.state import StateStore
+
+    class Bridge:
+        def model_tool_specs(self):
+            return []
+
+        async def call(self, name, args):
+            if name == "status":
+                return {"ok": True, "logged_in": True, "quota_left": 5}
+            if name == "safety_check":
+                return {"ok": True, "text": {"action": "allow"}, "video": {"action": "allow"}}
+            if name == "style_check":
+                return {"ok": True, "issues": []}
+            return {"ok": True}
+
+    class NoModel:
+        def chat(self, *a, **kw):
+            raise AssertionError("不该调模型")
+
+    run_id = "test-write-revoked"
+    paths = paths_for(run_id)
+    paths.run_dir.mkdir(parents=True, exist_ok=True)
+    cfg = make_run_config({"write": True, "max_comments": 1, "max_videos": 1})
+    store = StateStore(paths)
+    store.create(run_id, cfg)
+    memory = MemoryStore(paths, cfg)
+    memory.reset()
+    cand = {"bvid": "BV1rev0000001", "title": "测试视频", "author": "UP甲",
+            "play": 50000, "fans": 50000, "bucket": "AI技术"}
+
+    os.environ.pop("BILI_AUTOPILOT_ALLOW_WRITE", None)
+    try:
+        agent = Agent(bridge=Bridge(), ollama=NoModel(), memory=memory, config=cfg,
+                      state=store, paths=paths, candidates=[cand],
+                      bili_status={"logged_in": True, "quota_left": 5}, seen_bvids=set())
+        check("没有当前授权 → write_allowed=False", agent.write_allowed is False,
+              str(agent.write_allowed))
+        agent._cache_tool_result("subtitle", cand["bvid"], {"text": "普通技术视频字幕内容。"})
+        r = await agent._note_video({"bvid": cand["bvid"], "summary": "讲了工具用法",
+                                     "action": "comment",
+                                     "comment_text": "这个思路确实省事我也去折腾看看"})
+        check("没有当前授权 → 不能记 comment", r.get("ok") is False, str(r))
+        sent = await agent._comment_post({"draft_id": 1})
+        check("没有当前授权 → 发不出去", sent.get("ok") is False, str(sent))
+    finally:
+        os.environ["BILI_AUTOPILOT_ALLOW_WRITE"] = "1"
+
+
+async def test_caps_at_post() -> None:
+    """max_comments 必须在**发送时**也数一遍，不能只在 note 时数。"""
+    from bili_autopilot.agent import Agent
+    from bili_autopilot.config import paths_for
+    from bili_autopilot.memory import MemoryStore
+    from bili_autopilot.state import StateStore
+
+    class Bridge:
+        def __init__(self):
+            self.posted = []
+            self._n = 200
+
+        def model_tool_specs(self):
+            return []
+
+        async def call(self, name, args):
+            if name == "status":
+                return {"ok": True, "logged_in": True, "quota_left": 9}
+            if name == "safety_check":
+                return {"ok": True, "text": {"action": "allow"}, "video": {"action": "allow"}}
+            if name == "style_check":
+                return {"ok": True, "issues": []}
+            if name == "draft_create":
+                self._n += 1
+                return {"ok": True, "draft_id": self._n}
+            if name == "comment_post":
+                self.posted.append(dict(args))
+                return {"ok": True, "rpid": f"3220{len(self.posted):08d}"}
+            if name == "verify_posted":
+                return {"ok": True, "status": "found"}
+            return {"ok": True}
+
+    class NoModel:
+        def chat(self, *a, **kw):
+            raise AssertionError("不该调模型")
+
+    run_id = "test-caps-at-post"
+    paths = paths_for(run_id)
+    paths.run_dir.mkdir(parents=True, exist_ok=True)
+    cfg = make_run_config({"write": True, "max_comments": 1, "max_videos": 2})
+    store = StateStore(paths)
+    store.create(run_id, cfg)
+    memory = MemoryStore(paths, cfg)
+    memory.reset()
+    cands = [
+        {"bvid": "BV1cap000001", "title": "测试一", "author": "UP甲", "play": 50000,
+         "fans": 50000, "bucket": "AI技术"},
+        {"bvid": "BV1cap000002", "title": "测试二", "author": "UP乙", "play": 60000,
+         "fans": 60000, "bucket": "AI技术"},
+    ]
+    bridge = Bridge()
+    agent = Agent(bridge=bridge, ollama=NoModel(), memory=memory, config=cfg,
+                  state=store, paths=paths, candidates=cands,
+                  bili_status={"logged_in": True, "quota_left": 9}, seen_bvids=set())
+    good = "这个思路确实省事，我也去折腾一下看看效果"
+    for c in cands:
+        agent._cache_tool_result("subtitle", c["bvid"], {"text": "普通技术视频字幕内容。"})
+        await agent._note_video({"bvid": c["bvid"], "summary": "讲了工具用法",
+                                 "action": "comment", "comment_text": good})
+    ids = []
+    for c in cands:
+        d = await agent._draft_create({"bvid": c["bvid"], "text": good})
+        ids.append(d.get("draft_id"))
+    r1 = await agent._comment_post({"draft_id": ids[0]})
+    r2 = await agent._comment_post({"draft_id": ids[1]})
+    check("第一条发得出去", r1.get("ok") is True, str(r1))
+    check("第二条被本轮额度拦住", r2.get("ok") is False and "上限" in str(r2.get("error")), str(r2))
+    check("实际只发出去 1 条", len(bridge.posted) == 1, str(bridge.posted))
+
+
+def test_auto_finish_partial() -> None:
+    """熔断收尾必须标 partial，不能报成正常完成。"""
+    from bili_autopilot.agent import Agent
+    from bili_autopilot.config import paths_for
+    from bili_autopilot.memory import MemoryStore
+    from bili_autopilot.state import StateStore
+
+    class Dummy:
+        def model_tool_specs(self):
+            return []
+
+        async def call(self, name, args):
+            return {"ok": True}
+
+    class NoModel:
+        def chat(self, *a, **kw):
+            raise AssertionError("不该调模型")
+
+    run_id = "test-auto-finish"
+    paths = paths_for(run_id)
+    paths.run_dir.mkdir(parents=True, exist_ok=True)
+    cfg = make_run_config({"write": True, "max_comments": 1, "max_videos": 1})
+    store = StateStore(paths)
+    store.create(run_id, cfg)
+    memory = MemoryStore(paths, cfg)
+    memory.reset()
+    agent = Agent(bridge=Dummy(), ollama=NoModel(), memory=memory, config=cfg,
+                  state=store, paths=paths, candidates=[],
+                  bili_status={"logged_in": True, "quota_left": 3}, seen_bvids=set())
+    agent._auto_finish("同一个工具连续失败 5 次")
+    check("熔断后 partial=True", memory.data.get("partial") is True, str(memory.data.get("partial")))
+    check("熔断不报 completed", memory.data.get("status") != "completed",
+          str(memory.data.get("status")))
+    check("熔断原因写进 issues", "连续失败" in str(memory.data.get("finish", {}).get("issues")),
+          str(memory.data.get("finish", {}).get("issues")))
+
+
 async def main() -> int:
     await test_scout()
     await test_comment_flow()
@@ -571,6 +738,9 @@ async def main() -> int:
     test_watch_mids()
     test_fresh_days()
     test_summary()
+    await test_write_revoked()
+    await test_caps_at_post()
+    test_auto_finish_partial()
     print()
     print(f"PASS {PASS} / FAIL {FAIL}")
     return 0 if FAIL == 0 else 1

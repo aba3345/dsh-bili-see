@@ -33,7 +33,7 @@
  * ============================================================================
  */
 import { join } from 'node:path'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, unlinkSync } from 'node:fs'
 import { McpClient } from './lib/mcp-client.mjs'
 import { findPython, installHint } from './lib/python-env.mjs'
 import { loadHostDeps } from './lib/hostdeps.mjs'
@@ -285,6 +285,24 @@ export function apply(ctx, config) {
     return true
   }
 
+  /**
+   * 写权限的**运行时**标记。
+   *
+   * 为什么不能只靠环境变量：关「允许发评论」时宿主只杀掉 MCP 父进程，而 runner
+   * 是独立 Popen，手里攥着启动时那份 BILI_PLUS_WRITE=1。Python 侧每次发送前查这个
+   * 文件，才算真的"关得掉"（旧实现关不掉：旧任务照发）。
+   */
+  const WRITE_BLOCK_FILE = join(HOME, 'write-blocked')
+  const syncWriteBlock = () => {
+    try {
+      if (cfg.writeEnabled) {
+        if (existsSync(WRITE_BLOCK_FILE)) unlinkSync(WRITE_BLOCK_FILE)
+      } else if (!existsSync(WRITE_BLOCK_FILE)) {
+        writeFileSync(WRITE_BLOCK_FILE, new Date().toISOString(), 'utf8')
+      }
+    } catch { /* 家目录不可写时不致命，Python 侧还有环境变量那道闸 */ }
+  }
+
   const refreshCfg = () => {
     const base = { ...DEFAULTS }
     Object.assign(base, pick(readJson(CFG_FILE, {})))
@@ -293,6 +311,9 @@ export function apply(ctx, config) {
     cfg = base
     // 读完之后立刻对齐引擎，别让第三份快照活下去
     try { syncEngineConfig() } catch { /* 写盘失败不影响读配置 */ }
+    // 写权限是「运行中可撤销」的状态：落一个标记文件给 Python 侧查询，
+    // 光改环境变量撤不掉已经跑起来的 runner（它继承的是启动时那份）。
+    try { syncWriteBlock() } catch { /* 家目录不可写时忽略 */ }
     return cfg
   }
   refreshCfg()
@@ -554,16 +575,57 @@ export function apply(ctx, config) {
 
   /* ─────────────────────── run 目录读写（前端进度用） ─────────────────────── */
 
+  /**
+   * run_id 只允许是**一个目录名**。
+   *
+   * 旧实现直接 `join(RUNS_DIR, runId)`，于是 `run_id=../outside` 就能读到
+   * runs 目录之外的 state.json / digest.md（实测复现），python 侧的
+   * cancel/continue 也可能在外部目录里创建文件、按里面的 PID 杀进程。
+   */
+  const isSafeRunId = (v) => {
+    const s = String(v || '').trim()
+    if (!s || s.length > 64) return false
+    if (s === '.' || s === '..') return false
+    if (s.includes('..') || /[\\/]/.test(s)) return false
+    return /^[A-Za-z0-9._-]+$/.test(s)
+  }
+
   const readRunState = (runId) => {
-    if (!runId) return null
+    if (!isSafeRunId(runId)) return null
     return readJson(join(RUNS_DIR, runId, 'state.json'), null)
   }
 
   const readRunDigest = (runId, maxChars = 20000) => {
+    if (!isSafeRunId(runId)) return ''
     try {
       const text = readFileSync(join(RUNS_DIR, runId, 'digest.md'), 'utf8')
       return text.length > maxChars ? `${text.slice(0, maxChars)}\n…（已截断）` : text
     } catch { return '' }
+  }
+
+  /** PID 还在不在。EPERM 说明进程存在但不是我杀的，也算活着。 */
+  const pidAlive = (pid) => {
+    const n = Number(pid)
+    if (!Number.isFinite(n) || n <= 0) return false
+    try { process.kill(n, 0); return true } catch (e) { return e?.code === 'EPERM' }
+  }
+
+  /**
+   * 这一轮是真的还在跑吗？
+   *
+   * 旧实现只看 state.json 里的状态字符串，于是「runner 被 kill / OOM / 关机」
+   * 留下的 running 会让之后**每一次** tick 都返回 already_running（实测复现：
+   * 死 PID 的 run 永久占位）。这里补上进程存活核对：
+   *   · runner 自己写回 pid_alive=false → 失活
+   *   · 有 pid → 核对该 pid 是否存在
+   *   · 还没 pid（刚启动）→ 给 90 秒宽限，超时算失活
+   */
+  const isRunAlive = (row) => {
+    if (!row || !['starting', 'running', 'resuming'].includes(row.status)) return false
+    if (row.pid_alive === false) return false
+    if (row.pid) return pidAlive(row.pid)
+    const t = Date.parse(row.created_at || '')
+    return Number.isFinite(t) ? (Date.now() - t) < 90_000 : true
   }
 
   const listRuns = (limit = 12) => {
@@ -591,6 +653,8 @@ export function apply(ctx, config) {
         created_at: st.created_at || '',
         finished_at: st.finished_at || '',
         last_error: st.last_error || '',
+        pid: st.pid || null,
+        pid_alive: st.pid_alive,
         mtime,
         has_digest: existsSync(join(RUNS_DIR, id, 'digest.md')),
       })
@@ -599,7 +663,7 @@ export function apply(ctx, config) {
     return rows.slice(0, Math.max(1, Math.min(Number(limit) || 12, 50)))
   }
 
-  const activeRun = () => listRuns(50).find((r) => ['starting', 'running', 'resuming'].includes(r.status)) || null
+  const activeRun = () => listRuns(50).find((r) => isRunAlive(r)) || null
 
   /** 「其他视频」一行的配额加起来（前端的溢出提示要用同一套算法） */
   const otherQuotaTotal = (text) => String(text || '')
@@ -989,12 +1053,67 @@ export function apply(ctx, config) {
     } catch { /* 连接已断 */ }
   }
 
-  const readBody = async (req) => {
+  const readBody = async (req, maxBytes = 256 * 1024) => {
     const chunks = []
-    for await (const c of req) chunks.push(c)
+    let size = 0
+    for await (const c of req) {
+      size += c.length
+      if (size > maxBytes) throw new Error('请求体过大')
+      chunks.push(c)
+    }
     const raw = Buffer.concat(chunks).toString('utf8')
     if (!raw) return {}
     try { return JSON.parse(raw) } catch { return {} }
+  }
+
+  /**
+   * 配置补丁的**严格**校验。
+   *
+   * 旧实现只按键过滤、不校验类型，于是 `writeEnabled: "false"`（字符串）会一路
+   * 变成 `Boolean("false") === true` —— 用户以为关了写，实际打开（实测复现）。
+   * 这里按 DEFAULTS 的类型逐项校验：布尔只认 true/false 两个字面量，数字必须
+   * 是非负有限数，字符串必须是字符串；有任何不合法就整单拒绝（400），不半写。
+   */
+  const coercePatch = (raw) => {
+    const out = {}
+    const errors = []
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      return { out, errors: ['body 必须是 JSON 对象'] }
+    }
+    for (const [k, v] of Object.entries(raw)) {
+      if (!KNOWN_KEYS.has(k)) continue          // 老版本残留键：静默丢弃
+      const def = DEFAULTS[k]
+      if (typeof def === 'boolean') {
+        if (v === true || v === false) out[k] = v
+        else if (v === 'true' || v === 'false') out[k] = v === 'true'
+        else if (v === 1 || v === 0) out[k] = v === 1
+        else errors.push(`${k} 只能是 true / false`)
+      } else if (typeof def === 'number') {
+        const n = typeof v === 'string' ? Number(v.trim()) : v
+        if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) {
+          errors.push(`${k} 必须是 ≥ 0 的数字`)
+        } else out[k] = n
+      } else {
+        if (typeof v !== 'string') errors.push(`${k} 必须是字符串`)
+        else out[k] = v
+      }
+    }
+    return { out, errors }
+  }
+
+  /** 变更类路由的统一前置检查：媒体类型 + 同源。返回错误字符串 = 拒绝。 */
+  const guardMutation = (req) => {
+    const ct = String(req?.headers?.['content-type'] || '').toLowerCase()
+    if (!ct.includes('application/json')) return '只接受 application/json 正文'
+    const origin = req?.headers?.origin
+    if (origin) {
+      try {
+        const host = new URL(origin).host
+        const self = String(req?.headers?.host || '')
+        if (self && host !== self) return `拒绝跨源请求（${host} ≠ ${self}）`
+      } catch { return 'Origin 不合法' }
+    }
+    return ''
   }
 
   const API = '/api/bili-see'
@@ -1009,18 +1128,43 @@ export function apply(ctx, config) {
     }
 
     if (req.method === 'POST' && path === '/config') {
-      const body = await readBody(req)
-      const patch = body?.patch ?? body ?? {}
-      const before = { ...cfg }
-      saveCfgLocal(patch)
-      let hostOk = false
+      const bad = guardMutation(req)
+      if (bad) return sendJson(res, 403, { ok: false, error: bad })
+      let body
       try {
-        const row = settingsDesc(true)
-        if (row?.ns && typeof ctx?.settings?.update === 'function') {
+        body = await readBody(req)
+      } catch (e) {
+        return sendJson(res, 413, { ok: false, error: String(e?.message || e) })
+      }
+      const { out: patch, errors } = coercePatch(body?.patch ?? body ?? {})
+      if (errors.length) {
+        return sendJson(res, 400, { ok: false, error: '配置校验没过，已拒绝写入', errors })
+      }
+      const before = { ...cfg }
+      // 宿主设置是**权威**：先写宿主，成功了再落本地镜像。
+      // 旧实现先写本地、宿主的异常被吞掉，于是 config.json=false / 生效值=true /
+      // see-config.json=true 三份分叉，接口还回 ok:true（实测复现）。
+      let hostOk = false
+      let hostError = ''
+      const row = settingsDesc(true)
+      const hasHost = Boolean(row?.ns && typeof ctx?.settings?.update === 'function')
+      if (hasHost) {
+        try {
           await ctx.settings.update(row.ns, patch, row.revision)
           hostOk = true
+        } catch (e) {
+          hostError = String(e?.message || e)
+          invalidateSettings()
+          refreshCfg()   // 回到生效值，别留下半截状态
+          return sendJson(res, 409, {
+            ok: false,
+            error: '宿主保存失败，配置未生效（本地也没改）',
+            hostError,
+            config: cfg,
+          })
         }
-      } catch { /* 本地那份还在，不算致命 */ }
+      }
+      saveCfgLocal(patch)
       invalidateSettings()
       refreshCfg()
 
@@ -1036,7 +1180,10 @@ export function apply(ctx, config) {
           restarted.engine = true // 懒重建：下次调用时起
         }
       }
-      return sendJson(res, 200, { ok: true, config: cfg, hostSynced: hostOk, restarted, quota: quotaState() })
+      return sendJson(res, 200, {
+        ok: true, config: cfg, hostSynced: hostOk, hostError, restarted, quota: quotaState(),
+        warning: hostOk ? '' : `宿主没写成功：${hostError || '未知原因'}（本地已保存，但宿主侧的旧值可能盖回来）`,
+      })
     }
 
     /* ── Ollama 模型列表 ── */
@@ -1228,6 +1375,8 @@ export function apply(ctx, config) {
     }
 
     if (req.method === 'POST' && path === '/persona') {
+      const bad = guardMutation(req)
+      if (bad) return sendJson(res, 403, { ok: false, error: bad })
       const body = await readBody(req)
       const text = String(body.text ?? '')
       if (!text.trim()) return sendJson(res, 400, { ok: false, error: '人设不能为空' })

@@ -218,6 +218,11 @@ def _spawn_runner(run_id: str, *, resume: bool) -> int:
     env["BILI_AUTOPILOT_PYTHON"] = python_exe()
     env.setdefault("BILI_AUTOPILOT_HOME", str(default_home()))
     env.setdefault("BILI_PLUS_HOME", str(default_bili_plus_home()))
+    # ⚠️ 写授权**按当前时刻的**显式下发，不继承也可能残留的旧值。
+    #    恢复/续跑一个 write=true 的旧任务时，如果用户已经把开关关掉，
+    #    这里会把授权压成 0，让 runner 只能只读收尾（旧实现原样继承，
+    #    于是"关掉发评论"对已经启动的任务完全无效）。
+    env["BILI_AUTOPILOT_ALLOW_WRITE"] = "1" if allow_write_env() else "0"
 
     # ⚠️ 不要和 DETACHED_PROCESS 一起用 CREATE_NO_WINDOW：
     #    MSDN 明确写「CREATE_NO_WINDOW 与 DETACHED_PROCESS / CREATE_NEW_CONSOLE
@@ -657,6 +662,15 @@ def continue_run(
         config["max_minutes"] = int(max_minutes)
         save_run_config(paths, config)
 
+    # ⭐ 恢复旧任务时按**当前**授权收敛，绝不让旧快照扩大权限（新）。
+    #    旧实现直接相信 run/config.json 里的 write=true，于是"关掉开关"之后
+    #    再 resume 一个历史写任务，会把写权限一起带回来（探针复现）。
+    downgraded = False
+    if bool(config.get("write")) and not allow_write_env():
+        config["write"] = False
+        save_run_config(paths, config)
+        downgraded = True
+
     store.clear_cancel()
     store.update(
         status="resuming",
@@ -682,7 +696,12 @@ def continue_run(
     )
     if not state:
         return _json({"ok": False, "error": "run_state_missing", "run_id": run_id})
-    return _json(_payload(paths, state, max_chars=max(1000, min(int(max_chars), 40000))))
+    payload = _payload(paths, state, max_chars=max(1000, min(int(max_chars), 40000)))
+    if downgraded:
+        payload["write_downgraded"] = True
+        payload["note"] = ("这一轮的历史快照是 write=true，但当前没有写授权，"
+                           "已按只读方式继续（不会发评论）")
+    return _json(payload)
 
 
 def _credential_exists() -> bool:

@@ -158,6 +158,9 @@ class DB:
             ("approval_hash", "TEXT"),
             ("approval_expires", "INTEGER"),
             ("approval_consumed", "INTEGER"),
+            # claim_at：原子领取时的时间戳。status='sending' 的那几毫秒里，
+            # 其他发布者（宿主 MCP / runner MCP）必须能看见"这条已被占住"。
+            ("claim_at", "INTEGER"),
         ):
             if name not in cols:
                 self.conn.execute(f"ALTER TABLE drafts ADD COLUMN {name} {ddl}")
@@ -279,6 +282,89 @@ class DB:
         )
         self.conn.commit()
 
+    # ───────────────────── 发布：原子领取 ─────────────────────
+
+    def claim_draft(self, draft_id: int, *, max_posts_24h: int,
+                    stale_after: int = 180) -> tuple[bool, str]:
+        """把一条 pending 草稿**原子地**抢过来（pending → sending）。
+
+        返回 `(ok, reason)`，reason ∈ `not_found / not_pending / already_claimed /
+        quota / db_error:…`。
+
+        为什么必须是一个事务
+        --------------------
+        旧实现是「先读额度 → 发网络 → 再 mark_posted」。宿主 MCP 和 runner 自己
+        拉起的 MCP 是两个进程、两条 sqlite 连接，同时进来时会都读到 0 条已发，
+        于是同一条草稿被发两次、日限同时被突破（本仓库的探针实测复现过：
+        日限 1，2 次发送边界调用，账本只留 1 条 posted）。
+
+        这里把「回收超时占位 → 查额度 → 抢占状态」放进 `BEGIN IMMEDIATE` 一个
+        事务，SQLite 的写锁保证只有一个连接能把 pending 改成 sending。
+        `sending` 也算进当日额度，所以第二个发布者会直接撞 quota。
+        """
+        conn = self.conn
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.Error:
+            pass  # 已经在事务里（极少见），继续
+        try:
+            now = _now()
+            # 进程在「已占位」和「落账」之间崩掉，会留下 sending；超过 stale_after
+            # 秒就当成不确定结果（failed），不要卡死以后的发布。
+            conn.execute(
+                "UPDATE drafts SET status='failed', result=? "
+                "WHERE status='sending' AND COALESCE(claim_at,0) < ?",
+                (json.dumps({"error": "claim_timeout"}, ensure_ascii=False),
+                 now - int(stale_after)),
+            )
+            row = conn.execute("SELECT status FROM drafts WHERE id=?", (draft_id,)).fetchone()
+            if not row:
+                conn.rollback()
+                return False, "not_found"
+            if row["status"] == "sending":
+                conn.rollback()
+                return False, "already_claimed"
+            if row["status"] not in ("pending", "approved"):
+                conn.rollback()
+                return False, "not_pending"
+            used = conn.execute(
+                "SELECT COUNT(*) c FROM drafts WHERE status IN ('posted','sending') "
+                "AND COALESCE(posted_at, claim_at, 0) >= ?",
+                (now - 24 * 3600,),
+            ).fetchone()["c"]
+            if int(max_posts_24h) > 0 and int(used) >= int(max_posts_24h):
+                conn.rollback()
+                return False, "quota"
+            cur = conn.execute(
+                "UPDATE drafts SET status='sending', claim_at=? "
+                "WHERE id=? AND status IN ('pending','approved')",
+                (now, draft_id),
+            )
+            if cur.rowcount != 1:
+                conn.rollback()
+                return False, "already_claimed"
+            conn.commit()
+            return True, ""
+        except sqlite3.Error as exc:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            return False, f"db_error:{exc}"
+
+    def release_claim(self, draft_id: int, *, status: str = "pending",
+                      reason: str = "") -> None:
+        """占位之后的收场：发失败就退回 pending / 标 failed，别留 sending。"""
+        if status not in ("pending", "failed", "rejected"):
+            status = "pending"
+        self.conn.execute(
+            "UPDATE drafts SET status=?, claim_at=NULL, "
+            "result=CASE WHEN ?='' THEN result ELSE ? END WHERE id=? AND status='sending'",
+            (status, reason,
+             json.dumps({"error": str(reason)[:200]}, ensure_ascii=False), draft_id),
+        )
+        self.conn.commit()
+
     def mark_failed(self, draft_id: int, reason: str) -> None:
         self.conn.execute(
             "UPDATE drafts SET status='failed', result=? WHERE id=?",
@@ -346,6 +432,29 @@ class DB:
             """SELECT COUNT(*) c FROM drafts d JOIN videos v ON d.bvid = v.bvid
                WHERE v.owner=? AND d.status='posted' AND d.posted_at >= ?""",
             (owner, _now() - days * 86400),
+        ).fetchone()
+        return int(r["c"] or 0) > 0
+
+    def owner_mid_posted_within_days(self, owner_mid: int, days: int = 7) -> bool:
+        """同一 UP 主（按稳定 mid，不按会改的昵称）N 天内是否发过。
+
+        这是「同 UP 主 7 天去重」的正解：
+          · 旧实现只在 kind='reply' 且 target_author 非空时才查，普通评论完全不查；
+          · 查的又是 `videos.owner`（昵称），传进来的却是**被回复者的昵称**，
+            两者根本不是一回事 —— 昵称还会改名、重名。
+        这里按 owner_mid 对所有发布类型统一判定，sending 也算（并发下不漏）。
+        """
+        try:
+            mid = int(owner_mid or 0)
+        except (TypeError, ValueError):
+            return False
+        if mid <= 0:
+            return False
+        r = self.conn.execute(
+            """SELECT COUNT(*) c FROM drafts d JOIN videos v ON d.bvid = v.bvid
+               WHERE v.owner_mid=? AND d.status IN ('posted','sending')
+                 AND COALESCE(d.posted_at, d.claim_at, 0) >= ?""",
+            (mid, _now() - days * 86400),
         ).fetchone()
         return int(r["c"] or 0) > 0
 

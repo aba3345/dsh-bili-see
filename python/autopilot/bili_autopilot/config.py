@@ -55,8 +55,29 @@ class RunPaths:
         }
 
 
+def safe_run_id(run_id: str) -> str | None:
+    """run_id 必须是一个**纯目录名**；不合法返回 None。
+
+    旧实现 `runs / run_id` 完全不校验，`../outside` 这种就能读到 runs 目录
+    之外的 state.json/digest.md，cancel/continue 还会在外部目录建文件、
+    按里面的 PID 去杀进程（实测复现）。
+    """
+    s = str(run_id or "").strip()
+    if not s or len(s) > 64:
+        return None
+    if s in {".", ".."} or ".." in s or "/" in s or "\\" in s:
+        return None
+    if not all(c.isalnum() or c in "._-" for c in s):
+        return None
+    return s
+
+
+# 非法 run_id 一律指到这个占位目录：读不到（run_not_found），也绝不会越界。
+_INVALID_RUN_DIR = "__invalid__"
+
+
 def paths_for(run_id: str) -> RunPaths:
-    run_dir = default_home() / "runs" / run_id
+    run_dir = default_home() / "runs" / (safe_run_id(run_id) or _INVALID_RUN_DIR)
     return RunPaths(
         run_dir=run_dir,
         state=run_dir / "state.json",

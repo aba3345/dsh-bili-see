@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import sys
@@ -195,6 +196,32 @@ def tool():
     return deco
 
 
+# 宿主撤销写权限时落这个标记文件。**关键**：写权限不能只在进程启动时定一次。
+# 关开关时宿主杀掉的是 MCP 父进程，而 runner 是独立进程、手里攥着启动时那份
+# BILI_PLUS_WRITE=1；不查这个文件，"关掉发评论"就撤销不了已经在跑的活。
+WRITE_BLOCK_FILE = Path(
+    os.environ.get("BILI_PLUS_WRITE_BLOCK_FILE") or (HOME / "write-blocked")
+)
+
+
+def write_permission_error() -> Optional[str]:
+    """当前这一刻能不能写。返回 None = 可以；否则返回拒绝原因。
+
+    三道独立来源，任一否决就拒：
+      ① 进程环境 `BILI_PLUS_WRITE`（启动授权）
+      ② 宿主撤销标记文件（**运行中可撤销**）
+      ③ 数据库 paused（风控 / 人工暂停）—— 在调用点单独判，这里不重复
+    """
+    if not WRITE_ENABLED:
+        return "写入未启用（BILI_PLUS_WRITE 没开）"
+    try:
+        if WRITE_BLOCK_FILE.exists():
+            return "写权限已被宿主撤销（write-blocked 标记存在）"
+    except OSError:
+        pass
+    return None
+
+
 def write_tool():
     """写类工具：**没开 BILI_PLUS_WRITE 就完全不注册**（不是注册了再拒绝）。"""
     def deco(fn):
@@ -205,9 +232,76 @@ def write_tool():
     return deco
 
 
+def risk_guard(fn):
+    """统一异常出口 —— **真的接到工具上**。
+
+    旧版本写了 `_guard()` 却没在任何地方调用，于是风控命中（-412）时异常直接
+    穿透 `comment_post`，既不会暂停、也不会带 risk_control 信号给上层，
+    模型只会看到一条"未知错误"然后继续重试。
+
+    这里把异常兜住并**持久化暂停**：命中风控就 `set_paused(True)`，
+    下一轮 `status` 会带 paused，发送前的第一道闸直接拦住。
+    `functools.wraps` 保住签名，FastMCP 生成 schema 时不受影响。
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except wbi.BiliError as e:
+            if e.risk:
+                try:
+                    db().set_paused(True, f"风控 {e.code}: {e.message}")
+                    db().record_action("risk_control", "", {
+                        "paused": True, "api_code": e.code,
+                    }, {"ok": False, "error": e.message})
+                except Exception:  # noqa: BLE001
+                    pass
+                return _err(e, paused=True,
+                            hint="命中 B站 风控，插件已自动暂停。过几小时再手动恢复，"
+                                 "别立刻重试（连续失败会升级成更重的限制）")
+            return _err(e)
+        except Exception as e:  # noqa: BLE001
+            print(traceback.format_exc(), file=sys.stderr)
+            return _err(e)
+    return wrapper
+
+
 def _ok(obj: Any) -> str:
     return json.dumps({"ok": True, **(obj if isinstance(obj, dict) else {"data": obj})},
                       ensure_ascii=False)
+
+
+def _write_credential(cred: dict[str, str]) -> None:
+    """把凭证落盘：**临时文件从创建那一刻就是 0600**，再原子替换。
+
+    旧实现是 `tmp.write_text(...)` 然后 `os.replace` 再 `chmod(0600)` ——
+    在 replace 之前那一小段时间里，临时文件用的是 umask 默认权限（POSIX 上
+    通常是 0644），同机其他用户能读到 SESSDATA。用 os.open 带 0o600 就没有这个窗口。
+    （Windows 上 chmod 只影响只读位，这层保护有限，但不会更差。）
+    """
+    payload = json.dumps(cred, ensure_ascii=False, indent=2)
+    tmp = CRED_FILE.with_suffix(".tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    except OSError:
+        # 极端情况（文件被占/权限）退回普通写，至少别让登录失败
+        tmp.write_text(payload, encoding="utf-8")
+    else:
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+        except OSError:
+            pass
+    os.replace(tmp, CRED_FILE)  # 原子写：写一半被打断不会留个坏文件
+    try:
+        os.chmod(CRED_FILE, 0o600)
+    except OSError:
+        pass
+    if os.name != "nt":
+        try:
+            os.chmod(HOME, 0o700)  # 家目录里全是凭证/数据库/运行记录
+        except OSError:
+            pass
 
 
 def _err(e: Exception, **extra: Any) -> str:
@@ -336,13 +430,7 @@ def login_qr_poll(key: str) -> str:
             "dedeuserid": jar.get("DedeUserID", ""),
         }
         CRED_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = CRED_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(cred, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, CRED_FILE)  # 原子写：写一半被打断不会留个坏文件
-        try:
-            os.chmod(CRED_FILE, 0o600)
-        except OSError:
-            pass
+        _write_credential(cred)
         c = wbi.BiliClient(cred)
         return _ok({"status": "ok", "uname": c.uname(), "mid": c.uid(),
                     "credential_file": str(CRED_FILE)})
@@ -568,6 +656,7 @@ def safety_check(text: str = "", bvid: str = "") -> str:
 # ─────────────────────────── 写：草稿 / 审批 / 发 ───────────────────────────
 
 @write_tool()
+@risk_guard
 def draft_create(bvid: str, text: str, rationale: str = "",
                  kind: str = "comment", root_rpid: int = 0,
                  parent_rpid: int = 0, target_author: str = "",
@@ -582,6 +671,13 @@ def draft_create(bvid: str, text: str, rationale: str = "",
     - 传了 `reply_to_rpid` 的话，root/parent 会自动从服务端解析出来，
       优先级高于手填的 root_rpid/parent_rpid —— **推荐用它，别自己猜**。
     会在写入前跑一遍 safety，硬拦截会直接拒绝建稿。"""
+    # 权限闸（第 0 道）：环境 + 宿主撤销标记，任一否决就不建稿
+    denied = write_permission_error()
+    if denied:
+        return json.dumps({
+            "ok": False, "error": denied, "write_blocked": True,
+            "draft_not_created": True,
+        }, ensure_ascii=False)
     # 测试通道闸门：建稿时就拦，别等发了才发现发错地方。
     _tm = _test_mode_error(bvid)
     if _tm:
@@ -783,6 +879,7 @@ def draft_delete(draft_id: int, reason: str = "") -> str:
 
 
 @write_tool()
+@risk_guard
 def comment_post(draft_id: int, token: str = "", dry_run: bool = False) -> str:
     """**真发出去**。
 
@@ -798,6 +895,14 @@ def comment_post(draft_id: int, token: str = "", dry_run: bool = False) -> str:
 
     `token` 参数留着只为兼容旧调用方，**已经不再校验**。
     `dry_run=true` 只走检查不真发 —— 建议先用它确认一遍。"""
+    # 第 0 道：权限状态（环境 + 宿主撤销标记）。**每次调用都查**，
+    # 所以"关掉发评论"对已经在跑的任务也立即生效。
+    denied = write_permission_error()
+    if denied:
+        return json.dumps({
+            "ok": False, "error": denied, "write_blocked": True,
+        }, ensure_ascii=False)
+
     d = db()
     did = int(draft_id)
 
@@ -830,10 +935,23 @@ def comment_post(draft_id: int, token: str = "", dry_run: bool = False) -> str:
         return json.dumps({"ok": False, "error": f"发前复核没过: {v.action}",
                            "hits": v.hits, "fixes": v.fixes}, ensure_ascii=False)
 
-    used = d.count_posts_since(24)
-    if used >= MAX_POSTS_PER_DAY:
-        return json.dumps({"ok": False, "error": f"今天已经发了 {used} 条（上限 {MAX_POSTS_PER_DAY}）"},
-                          ensure_ascii=False)
+    # ⭐ 风格复核（新）：**发之前**必须再跑一遍 persona.check_style。
+    #    旧实现只在 draft_create 里 query 一次、而且只提示不拦，于是
+    #    「作为一个AI语言模型…」这种破人设的句子照样能发出去（探针复现）。
+    #    draft_create 之后还可能被 draft_update 改正文，所以这一遍不能省。
+    #    issues = 硬问题（禁词/身份自曝/复读），warnings 只提示不拦。
+    style = persona.check_style(text)
+    style_issues = [str(x) for x in (style.get("issues") or [])]
+    if style_issues:
+        d.mark_failed(did, "style:" + ";".join(style_issues)[:160])
+        return json.dumps({
+            "ok": False,
+            "error": "发前风格复核没过（正文不符合人设硬规则）",
+            "issues": style_issues,
+            "fixes": ["改成 20~50 字、口语化的一句真实反应；"
+                      "不要自称 AI/语言模型，不要复读标题或字幕"],
+        }, ensure_ascii=False)
+
     gap = d.minutes_since_last_post()
     # MIN_POST_INTERVAL_MIN == 0 表示**不冷却**（主人在设置页关掉时才会是 0）
     if MIN_POST_INTERVAL_MIN > 0 and gap is not None and gap < MIN_POST_INTERVAL_MIN:
@@ -861,11 +979,27 @@ def comment_post(draft_id: int, token: str = "", dry_run: bool = False) -> str:
         tags = api.get_tags(c, dr["bvid"])
     except wbi.BiliError:
         tags = []
+    # 把视频元数据落库 —— 下面按 owner_mid 去重要 JOIN 它
+    try:
+        d.upsert_video({**vid, "tags": tags})
+    except Exception:  # noqa: BLE001
+        pass
     sv = safety.check_video({**vid, "tags": tags})
     if sv.action == safety.NO_REPLY:
         d.mark_failed(did, "video_no_reply")
         return json.dumps({"ok": False, "error": "这条视频本身不该碰（见 hits）",
                            "hits": sv.hits}, ensure_ascii=False)
+
+    # ⭐ 同 UP 主 7 天去重（新）：按稳定的 owner_mid，覆盖**所有**发布类型。
+    #    旧实现只在 kind='reply' 且 target_author 非空时查，普通评论完全不查；
+    #    而且拿"被回复者的昵称"去比对 videos.owner（视频 UP 的昵称），对象就不对。
+    owner_mid = vid.get("author_mid") or 0
+    if d.owner_mid_posted_within_days(owner_mid, 7):
+        return json.dumps({
+            "ok": False,
+            "error": f"7 天内已经在这个 UP 主（mid={owner_mid}）的视频下发过评论了",
+            "rule": "same_up_7d",
+        }, ensure_ascii=False)
 
     if dr["target_author"] and dr["kind"] == "reply":
         if d.owner_posted_within_days(dr["target_author"], 7):
@@ -876,7 +1010,7 @@ def comment_post(draft_id: int, token: str = "", dry_run: bool = False) -> str:
     if dry_run:
         return _ok({"dry_run": True, "would_post": text,
                     "bvid": dr["bvid"], "kind": dr["kind"],
-                    "checks": "全部通过"})
+                    "checks": "全部通过（未占额度、未落账）"})
 
     # 🔴 发前最后一道：把 (root, parent) 再问一次服务端。
     # 草稿可能是老代码建的（parent 空），也可能这期间楼层结构变了。
@@ -897,11 +1031,35 @@ def comment_post(draft_id: int, token: str = "", dry_run: bool = False) -> str:
                                "error": f"发前解析回复目标失败，已中止：{e.message}",
                                "draft_id": did}, ensure_ascii=False)
 
-    res = api.post_comment(
-        c, dr["bvid"], text,
-        root=root_id,
-        parent=parent_id,
-    )
+    # ⭐ 原子领取（新）：额度检查 + 状态抢占在**一个事务**里完成。
+    #    旧实现「读额度 → 发网络 → 落账」中间隔着一次 HTTP，两个发布者
+    #    （宿主 MCP 与 runner 自己的 MCP）会同时通过检查、各发一次。
+    claimed, reason = d.claim_draft(did, max_posts_24h=MAX_POSTS_PER_DAY)
+    if not claimed:
+        msg = {
+            "quota": f"今天已经达到上限 {MAX_POSTS_PER_DAY} 条（含发送中的占位）",
+            "already_claimed": "这条草稿正在被另一个发布者发送，未重复发",
+            "not_pending": "这条草稿已经发过或已作废",
+            "not_found": f"草稿 {did} 不存在",
+        }.get(reason, f"领取草稿失败：{reason}")
+        return json.dumps({"ok": False, "error": msg, "reason": reason},
+                          ensure_ascii=False)
+
+    try:
+        res = api.post_comment(
+            c, dr["bvid"], text,
+            root=root_id,
+            parent=parent_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # 网络/风控异常：把占位退回 pending（不确定有没有发出去，但绝不留在 sending），
+        # 然后交给 risk_guard 决定要不要持久化暂停。
+        try:
+            d.release_claim(did, status="pending", reason=f"send_failed:{type(exc).__name__}")
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+
     d.mark_posted(did, res)
     d.record_action("post", dr["bvid"], {"draft_id": did, "kind": dr["kind"]}, res)
     out = {
@@ -923,11 +1081,16 @@ def comment_post(draft_id: int, token: str = "", dry_run: bool = False) -> str:
 
 
 @write_tool()
+@risk_guard
 def comment_delete(bvid: str, rpid: int) -> str:
     """删自己发过的评论。
 
     ⚠️ **只删本插件发过的**：rpid 必须能在本地记录里查到，
     否则拒绝（防模型猜一个 rpid 去删别人的评论）。"""
+    denied = write_permission_error()
+    if denied:
+        return json.dumps({"ok": False, "error": denied, "write_blocked": True},
+                          ensure_ascii=False)
     d = db()
     found = d.find_posted_draft_by_rpid(bvid, rpid)
     if not found:
@@ -1009,14 +1172,31 @@ def verify_posted(draft_id: int) -> str:
         except wbi.BiliError as e:
             return json.dumps({"ok": False, "error": f"查楼中楼失败: {e}"}, ensure_ascii=False)
 
-    # 顶层评论：翻几页找（热度排序，新评论在后面）
+    # 顶层评论：先按 rpid **精确查**（/reply/reply 的 data.root 就是这条评论本身），
+    # 查不到再按时间翻几页兜底。
+    # 旧实现只翻 mode=3（热度）前 5 页 —— 0 赞的新评论永远进不去，于是刚发出去
+    # 自己就报 not_found（实测：BV1btH36uEru 的 rpid 322069901168 明明在线，
+    # 8 分钟后仍查不到；5 小时后那条已经被新评论挤到第 3 页开外）。
     if found is None and kind == "comment":
-        checked_by = "reply/wbi/main"
+        checked_by = "reply/reply(root)"
         try:
             c.ensure_buvid3()
-            for pn in range(1, 6):
+            r = c.get("/x/v2/reply/reply",
+                      {"type": 1, "oid": aid, "root": rpid, "ps": 20, "pn": 1},
+                      wbi=True)
+            guard_api(r, "查评论详情")
+            root_obj = ((r.get("data") or {}).get("root") or {})
+            if int(root_obj.get("rpid") or 0) == rpid:
+                found = root_obj
+        except wbi.BiliError:
+            found = None   # 评论被删/接口变了 → 交给下面的兜底
+    if found is None and kind == "comment":
+        checked_by = "reply/reply(root)+main?mode=2"
+        try:
+            c.ensure_buvid3()
+            for pn in range(1, 4):
                 r = c.get("/x/v2/reply/wbi/main",
-                          {"type": 1, "oid": aid, "mode": 3, "ps": 20, "pn": pn},
+                          {"type": 1, "oid": aid, "mode": 2, "pn": pn, "ps": 20},
                           wbi=True, dm=True)
                 guard_api(r, "查评论列表")
                 data = r.get("data") or {}
@@ -1029,7 +1209,8 @@ def verify_posted(draft_id: int) -> str:
                         break
                 if found:
                     break
-                if (data.get("cursor") or {}).get("is_end"):
+                cursor = data.get("cursor") or {}
+                if cursor.get("is_end") or not cursor.get("next"):
                     break
                 time.sleep(0.12)  # 和 get_comments 同一节奏，翻页太快会被风控
         except wbi.BiliError as e:

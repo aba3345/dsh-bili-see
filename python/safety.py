@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -51,16 +52,35 @@ def _rx(*terms: str) -> re.Pattern[str]:
     return re.compile("|".join(terms), re.I)
 
 
+# 零宽字符 / 双向控制符 / 软连字符：肉眼看不见，但能把「傻​逼」拆成三个字符，
+# 让所有字面匹配失效（探针实测：带零宽的辱骂被放行）。
+_ZERO_WIDTH = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\u00ad]")
+
+
+def _normalize(text: str) -> str:
+    """比对前的规整：NFKC（全角→半角）+ 去掉零宽/控制符。
+
+    只用于**匹配**，不改写要发出去的正文（正文的清洗走 sanitize）。
+    """
+    t = unicodedata.normalize("NFKC", str(text or ""))
+    return _ZERO_WIDTH.sub("", t)
+
+
 # ① 不谈的话题 —— 直接 no_reply（比 block 更硬：这条视频不该回）
 NO_REPLY_TOPICS: list[tuple[str, re.Pattern[str], str]] = [
     ("politics", _rx(
-        "政治", "政府", "共产党", "习近平", "主席", "总理", "选举", "游行", "六四", "文革",
+        "政治", "政府", "共产党", "习近平",
+        # 「主席」在「学生会主席 / 学生会」语境里是普通头衔，不是政治话题 ——
+        # 用定长后顾断言排除，避免把正常动画/校园内容误杀（探针实测误杀过）。
+        r"(?<!学生会)(?<!学生)主席",
+        "总理", "选举", "游行", "六四", "文革",
         "民主", "言论自由", "抗战", "近代史", "体制", "党政", "领导人", "两会", "人大代表",
     ), "政治话题"),
     ("economics", _rx(
         "GDP", "CPI", "股市", "A股", "房价", "通胀", "通货膨胀", "失业率", "关税", "贸易战",
         "比特币", "加密货币", "贫富差距", "经济下行", "降息", "加息", "人民币汇率", "理财",
-        "基金", "牛市", "熊市", "抄底", "韭菜",
+        # 「基金会」是机构名（开源基金会/慈善基金会），不是金融话题 ⇒ 用负向前瞻排除
+        r"基金(?!会)", "牛市", "熊市", "抄底", "韭菜",
     ), "经济/金融话题"),
     ("social_issues", _rx(
         "女权", "男权", "性别对立", "地域歧视", "民族问题", "宗教", "彩礼", "代孕",
@@ -107,11 +127,17 @@ INSULT = _rx(
     r"(去(你|尼)妈|他妈的|妈的|草泥马|滚蛋|去死)",
     r"(小|本地)(模型|AI)就是(垃圾|废物|不行)",
     r"(你|AI)(根本)?(不懂|什么都不懂|别装)",
+    # 补：裸骂词（不一定带「你/这个」前缀）。旧词表要求前缀，于是
+    # 「傻​逼才看不懂」这种旁骂被放行（探针实测漏放）。
+    r"(傻|沙|煞)(逼|比|笔|屌)", r"(智|脑)(障|残)", r"狗(东西|玩意|杂种)",
+    r"(去死|死全家|全家死光)", r"(废物|垃圾)(玩意|东西)",
 )
 
 # ⑤ 链接 / 引流 —— 硬阻断
 LINKS = _rx(
     r"https?://", r"www\.", r"b23\.tv", r"bilibili\.com", r"\.com\b", r"\.cn\b",
+    # 补：不止 .com/.cn。旧词表只盯着少数后缀，example.org 这类直接漏放（探针实测）
+    r"\.(org|net|io|me|tv|xyz|top|info|app|dev|link|site|club|cc|shop|live|vip|fun)\b",
     r"(加|私)(我)?(微信|QQ|群)", r"(扫码|二维码)",
     r"(点|看)(我)?(主页|简介)(有|看)",
 )
@@ -138,6 +164,9 @@ AI_TONE = _rx(
 FAKE_HUMAN = _rx(
     r"我(住在|家在|学校在|上学|上班|公司|单位)",
     r"我(男朋友|女朋友|老公|老婆|老公|爸妈|父母|家人|同学|朋友|同事)",
+    # 补：编造亲身经历（"我去年亲手做过这个实验"）旧词表完全没覆盖，探针实测放行
+    r"我[^。！？\n]{0,8}(亲手|亲自)[^。！？\n]{0,6}(做|试|用|干|去|见)过",
+    r"我(去年|今年|前年|上次|之前|以前|小时候|当时|那年|大学|高中)(也|还)?(做|试|用|去|见|玩)过",
 )
 
 # ⑨ AI 模型对比 —— 只 warn（**两个条件都命中才 warn**，防止单提到 DeepSeek 就误判）
@@ -218,7 +247,8 @@ def check_text(text: str, *, min_len: int = 5, max_len: int = 300,
     """
     if max_len == 300:  # 哨兵值：默认参数没被覆盖
         max_len = _persona_max_len(300)
-    t = (text or "").strip()
+    # 先规整再判：去零宽、全角归一。否则「傻\u200b逼」这种写法能整段绕过字面词表。
+    t = _normalize(text).strip()
     v = Verdict(text=t, length=len(t))
     acts: list[str] = []
 
@@ -301,6 +331,7 @@ def check_video(meta: dict[str, Any] | None) -> Verdict:
     tags = meta.get("tags") or []
     if isinstance(tags, (list, tuple)):
         blob += " " + " ".join(str(x) for x in tags)
+    blob = _normalize(blob)   # 标题里塞零宽字符同样能绕过词表
     if len(blob) > 2000:
         blob = blob[:2000]
 
@@ -318,8 +349,9 @@ def check_video(meta: dict[str, Any] | None) -> Verdict:
 
 
 def sanitize(text: str) -> str:
-    """去掉不该出现在评论里的东西（URL / 多余空白）。rewrite 档兜底用。"""
-    t = URL_ANY.sub("", text or "")
+    """去掉不该出现在评论里的东西（URL / 零宽字符 / 多余空白）。rewrite 档兜底用。"""
+    t = _ZERO_WIDTH.sub("", text or "")   # 零宽字符不该出现在要发的正文里
+    t = URL_ANY.sub("", t)
     t = re.sub(r"[ \t]{2,}", " ", t)
     t = re.sub(r"\n{3,}", "\n\n", t)
     return t.strip()

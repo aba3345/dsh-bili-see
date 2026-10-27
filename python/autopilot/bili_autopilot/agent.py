@@ -8,7 +8,7 @@ from typing import Any
 
 from . import budget
 from .bili_mcp import BiliPlusBridge
-from .config import RunPaths
+from .config import RunPaths, allow_write_env
 from .memory import MemoryStore
 from .ollama_client import ChatResult, OllamaClient, OllamaError
 from .prompts import all_tool_specs, continue_prompt, system_prompt, task_prompt
@@ -249,6 +249,9 @@ class Agent:
         self.note_bvids: set[str] = {
             v.get("bvid") for v in previous if v.get("bvid")
         }
+        # 本轮"消费过内容"的视频集合（video_info / subtitle / 结论 / 关键帧）。
+        # 浏览预算按它算，而不是只按 note 算 —— 否则换个工具就绕过去了。
+        self.touched_bvids: set[str] = set(self.note_bvids)
         self.draft_ids: dict[int, str] = {
             int(v["draft_id"]): v["bvid"]
             for v in previous
@@ -272,6 +275,9 @@ class Agent:
         self.last_prompt_tokens = 0
         self.write_allowed = (
             bool(config.get("write"))
+            # ⚠️ 必须同时看**当前**授权：run 快照可能是上次开的 write=true，
+            #    而用户已经把「允许发评论」关了。只看快照 = 关不掉（实测过）。
+            and allow_write_env()
             and not bool(bili_status.get("paused"))
             and int(bili_status.get("quota_left") if bili_status.get("quota_left") is not None else 1) > 0
         )
@@ -442,6 +448,21 @@ class Agent:
                     "ok": False,
                     "error": f"本次最多看 {self.config.get('max_videos')} 条视频，已经记录够了，请调用 autopilot_finish。",
                 }
+            # ⭐ 每轮浏览预算统一在这里扣（新）：
+            #    旧实现只挡 video_info，直接调 subtitle 就能在「最多看 1 条」的
+            #    设定下连着读第 2、3 条视频的字幕（探针复现）。凡是"第一次真正
+            #    消费某条视频内容"的工具，都必须先过这道预算。
+            if name in {"video_info", "subtitle", "ai_conclusion", "keyframes"}:
+                if (bvid not in self.touched_bvids
+                        and len(self.touched_bvids) >= int(self.config.get("max_videos", 1))):
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"本次最多看 {self.config.get('max_videos')} 条视频，"
+                            "已经用到上限了。请对已看过的视频收尾并调用 autopilot_finish。"
+                        ),
+                    }
+                self.touched_bvids.add(bvid)
             if name == "video_info":
                 call_args = {"bvid": bvid}
             elif name == "subtitle":
@@ -739,15 +760,26 @@ class Agent:
                         "用 autopilot_note_video(action='comment') 记一条再 finish。"
                     ),
                 }
-        self.memory.mark_finished(summary, highlights, issues, partial=False)
+        # 一条视频都没看成却报"正常完成"会骗人（旧实现就是这样，探针复现过）。
+        # 这种情况按**部分完成**落账，reason 写进 issues，摘要里也带着。
+        no_video = self._viewed_count() == 0
+        if no_video:
+            issues = list(issues) + ["本轮没有任何视频被实际看到（0 条），这不是一次正常完成"]
+        self.memory.mark_finished(summary, highlights, issues, partial=no_video)
         self.finished = True
-        self.partial = False
+        self.partial = no_video
         self.finish_summary = summary
-        self._trace("finish", summary=summary, highlights=highlights, issues=issues)
+        self._trace("finish", summary=summary, highlights=highlights,
+                    issues=issues, partial=no_video)
         return {"ok": True, "message": "已结束，正在生成本地汇报。"}
 
     def _auto_finish(self, reason: str) -> None:
-        """Stop the run cleanly when the model is stuck in a loop."""
+        """Stop the run cleanly when the model is stuck in a loop.
+
+        ⚠️ 熔断**不是**正常完成：重复调同一个失败工具 5 次说明这一轮已经废了。
+        旧实现写 `partial=False`，于是摘要说"completed"，把失败包装成成功
+        （探针复现：0 条视频、status=completed、partial=false）。
+        """
         if self.finished:
             return
         notes = len(self.note_bvids)
@@ -756,8 +788,9 @@ class Agent:
             summary,
             highlights=[f"已看 {notes} 条视频"] if notes else [],
             issues=[reason],
-            partial=False,
+            partial=True,
         )
+        self.partial = True
         self.finished = True
         self.partial = False
         self.finish_summary = summary
@@ -902,6 +935,15 @@ class Agent:
     async def _comment_post(self, args: dict[str, Any]) -> dict[str, Any]:
         if not self.write_allowed:
             return {"ok": False, "error": "写入未启用（只读/暂停/额度不足）"}
+        # ⭐ 本轮评论额度在**发送前**再数一遍（新）。
+        #    旧实现只在 note_video 里看已发数，于是"先 note 两条、再发两条"
+        #    能在 max_comments=1 时真发出 2 条（探针复现）。
+        cap = int(self.config.get("max_comments", 0) or 0)
+        if cap > 0 and len(self.posted) >= cap:
+            return {
+                "ok": False,
+                "error": f"本轮已发 {len(self.posted)} 条评论（上限 {cap}），不要再发，请 finish。",
+            }
         draft_id = int(args.get("draft_id") or 0)
         if draft_id not in self.draft_ids:
             return {"ok": False, "error": "draft_id 不是本次运行创建的，拒绝发送。"}
