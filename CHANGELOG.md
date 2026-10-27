@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+（暂无）
+
+## [1.1.0] - 2026-10-27
+
 ### 安全（按外部审核报告逐条修）
 
 - **写权限改成运行时可撤销的状态**：宿主关「允许发评论」时落一个 `write-blocked` 标记，Python 侧每次发送前都查它。以前只杀 MCP 父进程，runner 攥着启动时的 `BILI_PLUS_WRITE=1` 照发不误。
@@ -45,5 +49,6 @@
 
 首个公开版本
 
-[Unreleased]: https://github.com/aba3345/dsh-bili-see/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/aba3345/dsh-bili-see/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/aba3345/dsh-bili-see/releases/tag/v1.1
 [1.0.0]: https://github.com/aba3345/dsh-bili-see/releases/tag/v1.0.0

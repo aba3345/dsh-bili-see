@@ -1,6 +1,6 @@
 {
   "name": "dsh-bili-see",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "B站视频评论设置：读字幕/热评/关键帧 + 让本地小模型自己刷视频、判断、发评论。合并自 dsh-bili-plus 与 bili-autopilot。",
